@@ -4,13 +4,14 @@ import { Readable } from "stream";
 import type { Hono } from "hono";
 import { asRecord, errorJson, readJson } from "../../lib/http";
 import { requireUser } from "../../middleware/auth";
+import { isAdminEmail } from "../auth/identity";
 import { attachmentName, downloadTarget, finishUpload, recordPart, signParts, uploadStatus, writeDirectPart } from "./service";
 
 export function registerUploadRoutes(app: Hono) {
   app.get("/api/uploads/:fileId/download", async (c) => {
     const auth = await requireUser(c);
     if (!auth.user) return auth.response;
-    const result = await downloadTarget(c.req.param("fileId"), auth.user.id);
+    const result = await downloadTarget(c.req.param("fileId"), auth.user.id, isAdminEmail(auth.user.email));
     if (!result.ok) return errorJson(c, result.error, result.status);
     if (result.kind === "redirect") return c.redirect(result.redirect);
     try {

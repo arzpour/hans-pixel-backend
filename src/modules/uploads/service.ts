@@ -5,13 +5,19 @@ import { getDb } from "../../db/client";
 import { orderFiles, orders, uploadParts } from "../../db/schema";
 import { completeMultipartUpload, localFilePath, localFileSize, signDownload, signUploadPart, writeLocalFile } from "../storage";
 
-export async function ownedUpload(fileId: string, userId: string) {
+async function uploadRecord(fileId: string) {
   const db = await getDb();
   const [file] = await db.select().from(orderFiles).where(eq(orderFiles.id, fileId)).limit(1);
   if (!file) return null;
   const [order] = await db.select().from(orders).where(eq(orders.id, file.orderId)).limit(1);
-  if (!order || order.userId !== userId) return null;
+  if (!order) return null;
   return { file, order };
+}
+
+export async function ownedUpload(fileId: string, userId: string) {
+  const found = await uploadRecord(fileId);
+  if (!found || found.order.userId !== userId) return null;
+  return found;
 }
 
 export function expectedPartSize(sizeBytes: number, partSize: number, partNumber: number) {
@@ -153,9 +159,11 @@ export function attachmentName(filename: string) {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(safe)}`;
 }
 
-export async function downloadTarget(fileId: string, userId: string) {
-  const owned = await ownedUpload(fileId, userId);
-  if (!owned) return { ok: false as const, status: 404 as const, error: "That file is not on your order." };
+export async function downloadTarget(fileId: string, userId: string, admin: boolean) {
+  const owned = await uploadRecord(fileId);
+  if (!owned || (!admin && owned.order.userId !== userId)) {
+    return { ok: false as const, status: 404 as const, error: "That file is not on your order." };
+  }
   if (owned.file.status !== "complete") {
     return { ok: false as const, status: 409 as const, error: "This file is still sending. Download it after it is stored." };
   }
