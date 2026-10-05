@@ -1,0 +1,28 @@
+{
+  "name": "hans-pixel-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1143.0",
+    "@aws-sdk/s3-request-presigner": "^3.1143.0",
+    "@hono/node-server": "^1.19.6",
+    "dotenv": "^17.2.3",
+    "drizzle-orm": "^0.45.3",
+    "hono": "^4.10.3",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.20.6",
+    "typescript": "^5"
+  }
+}
