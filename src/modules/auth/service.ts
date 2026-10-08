@@ -8,6 +8,7 @@ import type { SessionUser } from "../../types/session";
 import { sendSignInCode } from "../email/resend";
 import { clearSessionCookie, readSessionToken } from "./cookies";
 import { hashSecret, hashesMatch } from "./crypto";
+import { normalizeNameKey } from "./identity";
 
 export async function getSession(c: Context): Promise<SessionUser | null> {
   const token = readSessionToken(c);
@@ -21,6 +22,7 @@ export async function getSession(c: Context): Promise<SessionUser | null> {
       userId: users.id,
       email: users.email,
       name: users.name,
+      phone: users.phone,
       emailVerifiedAt: users.emailVerifiedAt,
     })
     .from(sessions)
@@ -34,7 +36,47 @@ export async function getSession(c: Context): Promise<SessionUser | null> {
     return null;
   }
 
-  return { id: row.userId, email: row.email, name: row.name, verified: true };
+  return { id: row.userId, email: row.email, name: row.name, phone: row.phone, verified: true };
+}
+
+function sessionUser(user: { id: string; email: string; name: string | null; phone: string | null }) {
+  return { id: user.id, email: user.email, name: user.name, phone: user.phone, verified: true as const };
+}
+
+export async function signupConflict(email: string, name: string, phone: string, exceptUserId?: string) {
+  const db = await getDb();
+  const nameKey = normalizeNameKey(name);
+  const [byEmail] = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+  if (byEmail && byEmail.id !== exceptUserId) {
+    return { ok: false as const, status: 409 as const, error: "An account already uses this email." };
+  }
+  if (nameKey) {
+    const [byName] = await db.select({ id: users.id }).from(users).where(eq(users.nameKey, nameKey)).limit(1);
+    if (byName && byName.id !== exceptUserId) {
+      return { ok: false as const, status: 409 as const, error: "An account already uses this name." };
+    }
+  }
+  const [byPhone] = await db.select({ id: users.id }).from(users).where(eq(users.phone, phone)).limit(1);
+  if (byPhone && byPhone.id !== exceptUserId) {
+    return { ok: false as const, status: 409 as const, error: "An account already uses this mobile number." };
+  }
+  return { ok: true as const, nameKey };
+}
+
+export async function saveMobile(userId: string, phone: string) {
+  const db = await getDb();
+  const [taken] = await db.select({ id: users.id }).from(users).where(eq(users.phone, phone)).limit(1);
+  if (taken && taken.id !== userId) {
+    return { ok: false as const, status: 409 as const, error: "An account already uses this mobile number." };
+  }
+  const [updated] = await db.update(users).set({ phone }).where(eq(users.id, userId)).returning({
+    id: users.id,
+    email: users.email,
+    name: users.name,
+    phone: users.phone,
+  });
+  if (!updated) return { ok: false as const, status: 401 as const, error: "Sign in before you save a mobile number." };
+  return { ok: true as const, user: sessionUser(updated) };
 }
 
 export async function requestSignInCode(email: string) {
@@ -87,7 +129,7 @@ export async function requestSignInCode(email: string) {
   };
 }
 
-export async function verifySignInCode(email: string, code: string, name?: string) {
+export async function verifySignInCode(email: string, code: string, name?: string, phone?: string) {
   const db = await getDb();
   const [row] = await db
     .select()
@@ -116,6 +158,14 @@ export async function verifySignInCode(email: string, code: string, name?: strin
     return { ok: false as const, status: 401 as const, error: "That code is not right." };
   }
 
+  const signingUp = Boolean(name && phone);
+  let nameKey = name ? normalizeNameKey(name) : "";
+  if (signingUp && name && phone) {
+    const available = await signupConflict(email, name, phone);
+    if (!available.ok) return available;
+    nameKey = available.nameKey;
+  }
+
   await db.update(emailCodes).set({ consumedAt: new Date() }).where(eq(emailCodes.id, row.id));
 
   const [existing] = await db.select().from(users).where(eq(users.email, email)).limit(1);
@@ -126,18 +176,29 @@ export async function verifySignInCode(email: string, code: string, name?: strin
       .values({
         email,
         name: name || null,
+        nameKey: nameKey || null,
+        phone: phone || null,
         emailVerifiedAt: new Date(),
       })
       .returning();
     user = created;
+  } else if (signingUp) {
+    return { ok: false as const, status: 409 as const, error: "An account already uses this email." };
   } else {
     const nextName = name || user.name;
+    const nextKey = nextName ? normalizeNameKey(nextName) : null;
+    if (nextKey && nextKey !== user.nameKey) {
+      const [taken] = await db.select({ id: users.id }).from(users).where(eq(users.nameKey, nextKey)).limit(1);
+      if (taken && taken.id !== user.id) {
+        return { ok: false as const, status: 409 as const, error: "An account already uses this name." };
+      }
+    }
     const verifiedAt = user.emailVerifiedAt ?? new Date();
     await db
       .update(users)
-      .set({ name: nextName, emailVerifiedAt: verifiedAt })
+      .set({ name: nextName, nameKey: nextKey, emailVerifiedAt: verifiedAt })
       .where(eq(users.id, user.id));
-    user = { ...user, name: nextName, emailVerifiedAt: verifiedAt };
+    user = { ...user, name: nextName, nameKey: nextKey, emailVerifiedAt: verifiedAt };
   }
 
   if (!user) {
@@ -154,7 +215,7 @@ export async function verifySignInCode(email: string, code: string, name?: strin
   return {
     ok: true as const,
     token,
-    user: { id: user.id, email: user.email, name: user.name, verified: true as const },
+    user: sessionUser(user),
   };
 }
 

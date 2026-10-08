@@ -1,14 +1,25 @@
 import type { Hono } from "hono";
 import { asRecord, errorJson, readJson } from "../../lib/http";
 import { setSessionCookie } from "./cookies";
-import { isAdminEmail, isEmail, normalizeEmail } from "./identity";
-import { getSession, logout, requestSignInCode, verifySignInCode } from "./service";
+import { isAdminEmail, isEmail, normalizeEmail, normalizeMobile } from "./identity";
+import { getSession, logout, requestSignInCode, saveMobile, signupConflict, verifySignInCode } from "./service";
 
 export function registerAuthRoutes(app: Hono) {
   app.post("/api/auth/request-code", async (c) => {
     const body = asRecord(await readJson(c));
     const email = normalizeEmail(typeof body?.email === "string" ? body.email : "");
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    const phoneRaw = typeof body?.phone === "string" ? body.phone.trim() : "";
     if (!isEmail(email)) return errorJson(c, "Enter a valid email address.", 400);
+    if (name.length > 80) return errorJson(c, "Use a shorter name.", 400);
+
+    if (name || phoneRaw) {
+      if (!name) return errorJson(c, "Enter your name.", 400);
+      const phone = normalizeMobile(phoneRaw);
+      if (!phone) return errorJson(c, "Enter a mobile number.", 400);
+      const available = await signupConflict(email, name, phone);
+      if (!available.ok) return errorJson(c, available.error, available.status);
+    }
 
     const result = await requestSignInCode(email);
     console.log("requestSignInCode", result);
@@ -22,11 +33,15 @@ export function registerAuthRoutes(app: Hono) {
     const email = normalizeEmail(typeof body?.email === "string" ? body.email : "");
     const code = (typeof body?.code === "string" ? body.code : "").replace(/\s+/g, "");
     const name = typeof body?.name === "string" ? body.name.trim() : "";
+    const phoneRaw = typeof body?.phone === "string" ? body.phone.trim() : "";
+    const phone = phoneRaw ? normalizeMobile(phoneRaw) : null;
     if (!isEmail(email)) return errorJson(c, "Enter a valid email address.", 400);
     if (!/^\d{6}$/.test(code)) return errorJson(c, "Enter the 6-digit code.", 400);
     if (name.length > 80) return errorJson(c, "Use a shorter name.", 400);
+    if (phoneRaw && !phone) return errorJson(c, "Enter a mobile number.", 400);
+    if ((name && !phone) || (!name && phone)) return errorJson(c, "Enter your name and mobile number.", 400);
 
-    const result = await verifySignInCode(email, code, name || undefined);
+    const result = await verifySignInCode(email, code, name || undefined, phone || undefined);
     if (!result.ok) return errorJson(c, result.error, result.status);
     setSessionCookie(c, result.token);
     return c.json({ ok: true, user: result.user, isAdmin: isAdminEmail(result.user.email) });
@@ -35,6 +50,17 @@ export function registerAuthRoutes(app: Hono) {
   app.get("/api/auth/session", async (c) => {
     const user = await getSession(c);
     return c.json({ user, isAdmin: user ? isAdminEmail(user.email) : false });
+  });
+
+  app.post("/api/auth/mobile", async (c) => {
+    const user = await getSession(c);
+    if (!user) return errorJson(c, "Sign in before you save a mobile number.", 401);
+    const body = asRecord(await readJson(c));
+    const phone = normalizeMobile(typeof body?.phone === "string" ? body.phone : "");
+    if (!phone) return errorJson(c, "Enter a mobile number.", 400);
+    const result = await saveMobile(user.id, phone);
+    if (!result.ok) return errorJson(c, result.error, result.status);
+    return c.json({ ok: true, user: result.user, isAdmin: isAdminEmail(result.user.email) });
   });
 
   app.post("/api/auth/logout", async (c) => {
